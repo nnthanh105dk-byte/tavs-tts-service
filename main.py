@@ -23,9 +23,8 @@ import io
 import logging
 
 import edge_tts
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("tavs-tts")
@@ -44,11 +43,6 @@ app.add_middleware(
 )
 
 
-class TTSRequest(BaseModel):
-    lines: list[str] = Field(..., min_length=1, description="Danh sách câu lời thoại")
-    voice: str = Field(default="vi-VN-HoaiMyNeural", description="Tên giọng edge-tts")
-
-
 @app.get("/")
 def health_check():
     """
@@ -62,17 +56,30 @@ def health_check():
 
 
 @app.post("/tts")
-async def generate_tts(req: TTSRequest):
+async def generate_tts(request: Request):
     """
     Sinh audio + SRT cho toàn bộ danh sách câu.
-    Trả lỗi HTTP rõ ràng (không phải lỗi mơ hồ) nếu edge-tts thất bại,
-    để TAVS_TTS_Engine phía PHP hiển thị thông báo hữu ích cho người dùng.
+
+    Nhận JSON thô (không dùng pydantic model) và tự validate bằng tay —
+    quyết định kỹ thuật này nhằm tránh phụ thuộc pydantic v2 (vốn cần
+    biên dịch Rust qua maturin, dễ lỗi trên môi trường build có quyền
+    ghi hạn chế như Render free tier). Đơn giản hơn nhưng đủ an toàn cho
+    1 microservice nội bộ chỉ phục vụ chính plugin TAVS.
     """
-    if not req.lines:
-        raise HTTPException(status_code=400, detail="Danh sách lines rỗng.")
+    body = await request.json()
+
+    lines = body.get("lines")
+    voice = body.get("voice", "vi-VN-HoaiMyNeural")
+
+    if not isinstance(lines, list) or len(lines) == 0:
+        raise HTTPException(status_code=400, detail="Trường 'lines' phải là danh sách câu, không được rỗng.")
+    if not all(isinstance(line, str) and line.strip() for line in lines):
+        raise HTTPException(status_code=400, detail="Mỗi phần tử trong 'lines' phải là chuỗi ký tự không rỗng.")
+    if not isinstance(voice, str) or not voice.strip():
+        voice = "vi-VN-HoaiMyNeural"
 
     try:
-        audio_bytes, srt_content = await synthesize_with_timestamps(req.lines, req.voice)
+        audio_bytes, srt_content = await synthesize_with_timestamps(lines, voice)
     except Exception as exc:  # noqa: BLE001 — microservice nhỏ, log đủ chi tiết là đủ
         logger.exception("Lỗi khi sinh TTS")
         raise HTTPException(status_code=502, detail=f"Lỗi edge-tts: {exc}") from exc
